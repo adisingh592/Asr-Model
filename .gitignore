@@ -19,6 +19,7 @@ benchmark_results.json
 transcription_results.txt
 STREAMING_ASR_MODEL_SUMMARY.md
 *.log
+logs/
 
 # 4. Testing Scripts & Batch files
 test_sample.py

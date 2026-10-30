@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Server Live Monitor</title>
+<link rel="stylesheet" href="live.css">
+</head>
+<body>
+<header>
+  <h1>Server &middot; Live Monitor</h1>
+  <span id="link" class="pill bad">Server offline</span>
+  <span class="spacer"></span>
+  <span id="stage" class="pill">&mdash;</span>
+</header>
+<main>
+  <section class="cards">
+    <div class="card"><div class="label">Audio source</div><div class="value" id="device">&mdash;</div><div class="sub" id="device-sub">TCP :8766</div></div>
+    <div class="card"><div class="label">Audio rate</div><div class="value" id="rate">&mdash;</div><div class="sub">expect 32.0 kB/s (16 kHz &times; 16-bit)</div></div>
+    <div class="card"><div class="label">Received</div><div class="value" id="total">&mdash;</div><div class="sub" id="dur">&mdash;</div></div>
+    <div class="card"><div class="label">KWS latency</div><div class="value" id="kws-lat">&mdash;</div><div class="sub">per 1 s window</div></div>
+    <div class="card"><div class="label">Wake detections</div><div class="value wake-text" id="wakes">0</div><div class="sub" id="last-wake">none yet</div></div>
+  </section>
+
+  <section class="split">
+    <div class="panel">
+      <h2>Input</h2>
+      <div class="meter">
+        <div class="row"><span>Mic level</span><b id="level-text">&mdash;</b></div>
+        <div class="bar"><div class="fill" id="level-bar"></div></div>
+      </div>
+      <div class="meter">
+        <div class="row"><span>Wake confidence (&ldquo;Khus Khus&rdquo;)</span><b id="conf-text">&mdash;</b></div>
+        <div class="bar"><div class="fill wake" id="conf-bar"></div><div class="mark" id="thr-mark"></div></div>
+      </div>
+      <h2>Last 15 s <span><span style="color:var(--wake)">&#9632;</span> wake conf &nbsp;<span style="color:var(--accent)">&#9632;</span> level &nbsp;<span style="color:var(--bad)">&#9472;</span> threshold</span></h2>
+      <canvas id="chart"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Event log <button id="clear">Clear</button></h2>
+      <ul class="log" id="log"><li class="empty">Waiting for events&hellip;</li></ul>
+    </div>
+  </section>
+</main>
+<script src="live.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let threshold = 0.40, wakes = 0, deviceUp = false, lastStats = 0, lastConf = 0, lastLevel = 0;
+const history = []; // [t, conf, levelNorm]
+
+function log(text, cls = "", ts) {
+  const ul = $("log");
+  if (ul.firstElementChild?.classList.contains("empty")) ul.innerHTML = "";
+  const li = document.createElement("li");
+  if (cls) li.className = cls;
+  li.innerHTML = `<time>${Live.clock(ts)}</time><span></span>`;
+  li.lastChild.textContent = text;
+  ul.prepend(li);
+  while (ul.children.length > 300) ul.lastChild.remove();
+}
+$("clear").onclick = () => { $("log").innerHTML = ""; };
+
+function showStage(stage, model) {
+  const [cls, text] = Live.STAGES[stage] || ["", stage];
+  Live.setPill($("stage"), cls, model ? `${text} (${model})` : text);
+}
+function showDevice(client) {
+  deviceUp = !!client;
+  $("device").textContent = client || "None";
+  $("device").className = "value " + (client ? "ok-text" : "bad-text");
+  $("device-sub").textContent = client
+    ? (client === "127.0.0.1" ? "laptop mic (test_client.py)" : "ESP32 / remote device")
+    : "waiting on TCP :8766";
+  if (!client) { $("rate").textContent = "—"; $("rate").className = "value"; }
+}
+
+Live.onLink((up) => {
+  Live.setPill($("link"), up ? "ok" : "bad", up ? "Server online" : "Server offline: reconnecting…");
+  log(up ? "Connected to server event feed" : "Lost connection to server", up ? "ok" : "bad");
+  if (!up) { showDevice(null); showStage("waiting"); }
+});
+Live.on("state", (e) => {
+  threshold = e.threshold ?? threshold;
+  $("thr-mark").style.left = (threshold * 100) + "%";
+  showDevice(e.device); showStage(e.stage, e.model);
+});
+Live.on("device_connected", (e) => { showDevice(e.client); log(`Device connected: ${e.client}`, "ok", e.ts); });
+Live.on("device_disconnected", (e) => { showDevice(null); log(`Device disconnected: ${e.client}`, "bad", e.ts); });
+Live.on("stage", (e) => {
+  showStage(e.stage, e.model);
+  if (e.stage === "listening") log(`ASR started: ${e.model}`, "wake", e.ts);
+  if (e.stage === "choosing") log("Waiting for model choice in server terminal", "", e.ts);
+  if (e.stage === "standby") { lastConf = 0; }
+});
+Live.on("level", (e) => {
+  const db = e.rms > 0 ? 20 * Math.log10(e.rms) : -90;
+  lastLevel = Math.max(0, Math.min(1, (db + 60) / 60));
+  $("level-bar").style.width = (lastLevel * 100) + "%";
+  $("level-text").textContent = db <= -90 ? "silent" : `${db.toFixed(1)} dBFS`;
+  history.push([performance.now(), lastConf, lastLevel]);
+});
+Live.on("kws", (e) => {
+  lastConf = e.conf;
+  $("conf-bar").style.width = (e.conf * 100) + "%";
+  $("conf-text").textContent = (e.conf * 100).toFixed(1) + "%";
+  $("kws-lat").textContent = e.latency_ms.toFixed(1) + " ms";
+});
+Live.on("wake", (e) => {
+  wakes++;
+  $("wakes").textContent = wakes;
+  $("last-wake").textContent = `${e.at.split(" ")[1]} · ${(e.conf * 100).toFixed(1)}%`;
+  log(`WAKE WORD “Khus Khus”: conf ${(e.conf * 100).toFixed(1)}%, KWS ${e.latency_ms.toFixed(1)} ms`, "wake", e.ts);
+});
+Live.on("stats", (e) => {
+  lastStats = performance.now();
+  const kbs = e.bytes_per_sec / 1000;
+  $("rate").textContent = kbs.toFixed(1) + " kB/s";
+  $("rate").className = "value " + (kbs > 28 && kbs < 36 ? "ok-text" : "warn-text");
+  $("total").textContent = (e.total_bytes / 1e6).toFixed(2) + " MB";
+  $("dur").textContent = `${(e.total_bytes / 32000).toFixed(1)} s of audio`;
+});
+Live.on("final", (e) => log(`[${e.model}] “${e.text}”${e.flushed ? " (flushed on disconnect)" : ""}`, "ok", e.ts));
+Live.on("error", (e) => log(`Error: ${e.message}`, "bad", e.ts));
+
+// Flag a connected device that stopped sending audio
+setInterval(() => {
+  if (deviceUp && lastStats && performance.now() - lastStats > 2500) {
+    $("rate").textContent = "stalled"; $("rate").className = "value bad-text";
+  }
+}, 1000);
+
+// Rolling chart
+const canvas = $("chart"), ctx = canvas.getContext("2d");
+function draw() {
+  const dpr = devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const css = getComputedStyle(document.documentElement);
+  const now = performance.now(), span = 15000;
+  while (history.length && now - history[0][0] > span) history.shift();
+  ctx.strokeStyle = css.getPropertyValue("--line"); ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) { ctx.beginPath(); ctx.moveTo(0, h * i / 4); ctx.lineTo(w, h * i / 4); ctx.stroke(); }
+  const series = (idx, color) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    history.forEach(([t, ...v], i) => {
+      const x = w - (now - t) / span * w, y = h - v[idx - 1] * (h - 4) - 2;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+  };
+  series(2, css.getPropertyValue("--accent"));
+  series(1, css.getPropertyValue("--wake"));
+  ctx.strokeStyle = css.getPropertyValue("--bad"); ctx.setLineDash([5, 4]); ctx.lineWidth = 1.5;
+  const ty = h - threshold * (h - 4) - 2;
+  ctx.beginPath(); ctx.moveTo(0, ty); ctx.lineTo(w, ty); ctx.stroke(); ctx.setLineDash([]);
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

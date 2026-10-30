@@ -4,6 +4,7 @@ Receives 16 kHz PCM audio from ESP32, detects wake phrase 'khus khus',
 and offers interactive selection between Moonshine and Whisper Large-v3-Turbo.
 """
 
+import argparse
 import asyncio
 from datetime import datetime
 import json
@@ -29,6 +30,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from websockets.asyncio.server import broadcast, serve
 
 # Add project paths to sys.path
 sys.path.insert(0, 'E:/New folder (4)')
@@ -42,6 +44,10 @@ from kws.model import KhusKhusKWS
 from moonshine_streaming_engine import MoonshineStreamingEngine
 
 LOG_FILE = 'live_transcript_log.txt'
+KWS_THRESHOLD = 0.40
+
+# ASR model used after the wake word: 'ask' prompts in the terminal, or force one model
+ASR_MODE = 'ask'
 
 # =====================================================================
 # 1. Model Initialization
@@ -192,7 +198,38 @@ def log_transcript(text: str, wake_detected: bool = False, model_name: str = 'Mo
         f.write(f'[{timestamp}] {tag} {text}\n')
 
 # =====================================================================
-# 2. Interactive Asynchronous TCP Socket Server
+# 2. Live Dashboard Event Feed (WebSocket, consumed by dashboard/*.html)
+# =====================================================================
+
+DASHBOARD_HOST = '127.0.0.1'
+DASHBOARD_PORT = 8767
+dashboard_clients = set()
+event_loop = None
+live_state = {'device': None, 'stage': 'waiting', 'model': None}
+
+def emit(event_type: str, **data):
+    """Broadcasts one JSON event to every open dashboard window (safe from any thread)."""
+    if event_loop is None or not dashboard_clients:
+        return
+    data['type'] = event_type
+    data['ts'] = time.time()
+    event_loop.call_soon_threadsafe(broadcast, dashboard_clients, json.dumps(data))
+
+def set_stage(stage: str, model: str = None):
+    live_state['stage'] = stage
+    live_state['model'] = model
+    emit('stage', stage=stage, model=model)
+
+async def dashboard_handler(ws):
+    dashboard_clients.add(ws)
+    try:
+        await ws.send(json.dumps({'type': 'state', 'ts': time.time(), 'threshold': KWS_THRESHOLD, 'asr_mode': ASR_MODE, **live_state}))
+        await ws.wait_closed()
+    finally:
+        dashboard_clients.discard(ws)
+
+# =====================================================================
+# 3. Interactive Asynchronous TCP Socket Server
 # =====================================================================
 
 async def prompt_for_asr_choice() -> int:
@@ -224,19 +261,24 @@ async def tcp_handler(reader, writer):
     print('[+] Status: STANDBY -> Waiting for Wake-Word ("Khus Khus")')
     print('=' * 65)
     print('\n[*] Audio stream active. Say "Khus Khus" into the ESP32 microphone...\n')
-    
+    live_state['device'] = client_ip
+    emit('device_connected', client=client_ip)
+    set_stage('standby')
+
     moonshine_engine.reset()
-    
+
     def on_partial(partial_text, model_lat_ms):
         if partial_text:
             ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
             print(f'  [{ts}] 🎙️ [Hearing]: "{partial_text}" (Model Latency: {model_lat_ms:.1f}ms)          ', end='\r', flush=True)
+            emit('partial', text=partial_text, latency_ms=model_lat_ms)
 
     def on_final(final_text, model_lat_ms, duration_sec, rtf):
         if final_text:
             ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
             print(f'\r[{ts}] 🎯 [MOONSHINE TRANSCRIPT]: "{final_text}" | Latency: {model_lat_ms:.1f}ms | Audio Dur: {duration_sec:.2f}s | RTF: {rtf:.2f}    ')
             log_transcript(f'{final_text} (Latency: {model_lat_ms:.1f}ms, RTF: {rtf:.2f})', wake_detected=False, model_name='Moonshine')
+            emit('final', text=final_text, model='Moonshine', latency_ms=model_lat_ms, duration_s=duration_sec, rtf=rtf)
 
     moonshine_engine.on_partial_callback = on_partial
     moonshine_engine.on_final_callback = on_final
@@ -253,19 +295,35 @@ async def tcp_handler(reader, writer):
     whisper_collect_start = 0.0
     WHISPER_CAPTURE_SEC = 3.5
 
+    # Dashboard telemetry: incoming byte rate and throttled level updates
+    stats_window_start = time.time()
+    stats_window_bytes = 0
+    total_bytes = 0
+    last_level_emit = 0.0
+
     try:
         while True:
             chunk = await reader.read(1024)
             if not chunk or len(chunk) == 0:
                 break
-                
+
             current_time = time.time()
-            
+
             # Visual Audio Level Meter (Safe ASCII)
             samples_np = np.frombuffer(chunk, dtype=np.int16)
             rms = np.sqrt(np.mean((samples_np.astype(np.float32) / 32768.0)**2)) if len(samples_np) > 0 else 0
             meter_bars = int(min(10, rms * 50))
             level_str = '#' * meter_bars + '-' * (10 - meter_bars)
+
+            stats_window_bytes += len(chunk)
+            total_bytes += len(chunk)
+            if current_time - stats_window_start >= 1.0:
+                emit('stats', bytes_per_sec=stats_window_bytes / (current_time - stats_window_start), total_bytes=total_bytes)
+                stats_window_start = current_time
+                stats_window_bytes = 0
+            if current_time - last_level_emit >= 0.05:
+                last_level_emit = current_time
+                emit('level', rms=float(rms))
             
             # --- STAGE 1: Wake-Word Detection (Standby) ---
             if not is_awake:
@@ -291,8 +349,9 @@ async def tcp_handler(reader, writer):
                     kws_latency_ms = (t_kws_1 - t_kws_0) * 1000.0
                     
                     print(f'  [Standby - Say "Khus Khus"] Mic: [{level_str}]  Wake: {kw_conf*100:4.1f}% | Latency: {kws_latency_ms:4.1f}ms', end='\r', flush=True)
-                    
-                    if kw_conf >= 0.40:
+                    emit('kws', conf=kw_conf, latency_ms=kws_latency_ms)
+
+                    if kw_conf >= KWS_THRESHOLD:
                         is_awake = True
                         wake_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                         print('\n\n' + '#' * 65)
@@ -302,18 +361,25 @@ async def tcp_handler(reader, writer):
                         print(f'  📊 Confidence Score     : {kw_conf*100:.1f}%')
                         print('#' * 65)
                         log_transcript(f'Wake word detected at {wake_ts} (Latency: {kws_latency_ms:.2f}ms, Conf: {kw_conf*100:.1f}%)', wake_detected=True)
-                        
-                        # Prompt user for ASR choice
-                        choice = await prompt_for_asr_choice()
+                        emit('wake', conf=kw_conf, latency_ms=kws_latency_ms, at=wake_ts)
+
+                        # Prompt user for ASR choice (unless a model was fixed with --asr)
+                        if ASR_MODE == 'ask':
+                            set_stage('choosing')
+                            choice = await prompt_for_asr_choice()
+                        else:
+                            choice = 1 if ASR_MODE == 'moonshine' else 2
                         active_model_choice = choice
-                        
+
                         if choice == 1:
                             print('\n[+] Moonshine Streaming ASR Activated! Speak your command continuously...')
+                            set_stage('listening', model='Moonshine')
                             moonshine_engine.reset()
                             # Feed pre-roll audio buffer into Moonshine
                             moonshine_engine.process_pcm_chunk(bytes(audio_buffer))
                         else:
                             print(f'\n[+] Whisper Large-v3-Turbo Selected! Buffering command speech ({WHISPER_CAPTURE_SEC}s)...')
+                            set_stage('listening', model='Whisper')
                             whisper_post_wake_buffer.clear()
                             whisper_post_wake_buffer.extend(audio_buffer) # preserve pre-roll
                             is_collecting_whisper = True
@@ -330,12 +396,14 @@ async def tcp_handler(reader, writer):
                 whisper_post_wake_buffer.extend(chunk)
                 dur = len(whisper_post_wake_buffer) / 32000.0
                 print(f'  🎙️ [Buffering Whisper Audio] Mic: [{level_str}] Captured: {dur:4.2f}s / {WHISPER_CAPTURE_SEC:.1f}s', end='\r', flush=True)
-                
+                emit('whisper_progress', captured_s=dur, total_s=WHISPER_CAPTURE_SEC)
+
                 if (current_time - whisper_collect_start) >= WHISPER_CAPTURE_SEC:
                     is_collecting_whisper = False
                     audio_snap = bytes(whisper_post_wake_buffer)
                     print(f'\n[*] Running Whisper Large-v3-Turbo on {len(audio_snap)/32000.0:.2f}s audio...')
-                    
+                    set_stage('transcribing', model='Whisper')
+
                     adapter = get_whisper_adapter()
                     res = adapter.transcribe(audio_snap, sample_rate=16000)
                     
@@ -360,21 +428,28 @@ async def tcp_handler(reader, writer):
                     print('=' * 65 + '\n')
                     
                     log_transcript(f'{transcript_text} (Latency: {total_lat:.1f}ms, RTF: {rtf:.2f})', wake_detected=False, model_name='Whisper')
-                    
+                    emit('final', text=transcript_text, model='Whisper', latency_ms=total_lat, duration_s=audio_dur, rtf=rtf)
+
                     # Return to standby
                     is_awake = False
                     print('[+] Standby -> Listening for next wake word ("Khus Khus") from ESP32...\n')
-                    
+                    set_stage('standby')
+
     except asyncio.CancelledError:
         pass
     except Exception as e:
         print(f'\n[!] Connection exception: {e}')
+        emit('error', message=str(e))
     finally:
         if is_awake and active_model_choice == 1 and moonshine_engine.last_partial_text:
             ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
             print(f'\r[{ts}] 🎯 [TRANSCRIPT]: "{moonshine_engine.last_partial_text}" (Flushed on Disconnect)           ')
             log_transcript(moonshine_engine.last_partial_text, wake_detected=False, model_name='Moonshine')
+            emit('final', text=moonshine_engine.last_partial_text, model='Moonshine', flushed=True)
         print(f'\n[-] ESP32 Disconnected from {client_ip}.\n')
+        live_state['device'] = None
+        emit('device_disconnected', client=client_ip)
+        set_stage('waiting')
         try:
             writer.close()
             await writer.wait_closed()
@@ -382,21 +457,30 @@ async def tcp_handler(reader, writer):
             pass
 
 async def main():
+    global event_loop
+    event_loop = asyncio.get_running_loop()
     host = '0.0.0.0'
     port = 8766
     server = await asyncio.start_server(tcp_handler, host, port)
-    
-    print('=' * 65)
-    print(f'   ASR & KWS Server Running on {host}:{port}')
-    print(f'   Trained Wake Model : KhusKhus-KWS (best_model.pth)')
-    print(f'   Dual ASR Engines   : [1] Moonshine Streaming Tiny  [2] Whisper Large-v3-Turbo')
-    print(f'   Ready and waiting for ESP32 connection...')
-    print('=' * 65 + '\n')
-    
-    async with server:
-        await server.serve_forever()
+
+    async with serve(dashboard_handler, DASHBOARD_HOST, DASHBOARD_PORT):
+        print('=' * 65)
+        print(f'   ASR & KWS Server Running on {host}:{port}')
+        print(f'   Live Dashboard Feed: ws://{DASHBOARD_HOST}:{DASHBOARD_PORT} (open dashboard/server.html)')
+        print(f'   Trained Wake Model : KhusKhus-KWS (best_model.pth)')
+        print(f'   Dual ASR Engines   : [1] Moonshine Streaming Tiny  [2] Whisper Large-v3-Turbo')
+        print(f'   Post-Wake ASR Mode : {ASR_MODE}')
+        print(f'   Ready and waiting for ESP32 connection...')
+        print('=' * 65 + '\n')
+
+        async with server:
+            await server.serve_forever()
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='ESP32 KWS + ASR streaming server')
+    parser.add_argument('--asr', choices=['ask', 'moonshine', 'whisper'], default='ask',
+                        help='ASR model after the wake word (default: ask in the terminal)')
+    ASR_MODE = parser.parse_args().asr
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

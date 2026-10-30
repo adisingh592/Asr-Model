@@ -9,8 +9,8 @@
 #include <driver/i2s.h>
 
 // WiFi Configuration
-const char *WIFI_SSID = "Aditya Pratap's S24";
-const char *WIFI_PASSWORD = "Mayaksh9569";
+const char *WIFI_SSID = "wifi Name";
+const char *WIFI_PASSWORD = "PASSWORD";
 
 // Server Configuration (Laptop IP running server.py)
 const char *SERVER_IP = "10.118.171.70";

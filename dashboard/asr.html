@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASR Live Transcript</title>
+<link rel="stylesheet" href="live.css">
+<style>
+  .banner {
+    border-radius: 12px; padding: 18px 20px; border: 1px solid var(--line); background: var(--panel);
+    display: flex; align-items: center; gap: 14px; transition: border-color .2s, box-shadow .2s;
+  }
+  .banner .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--muted); flex: none; }
+  .banner.standby .dot { background: var(--ok); }
+  .banner.awake { border-color: var(--wake); box-shadow: 0 0 0 3px color-mix(in srgb, var(--wake) 25%, transparent); }
+  .banner.awake .dot { background: var(--wake); animation: pulse 1s infinite; }
+  .banner.busy .dot { background: var(--warn); animation: pulse .6s infinite; }
+  .banner.off .dot { background: var(--bad); }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .banner .title { font-size: 18px; font-weight: 600; }
+  .banner .sub { color: var(--muted); font-size: 13px; }
+  .hearing { font-size: 26px; line-height: 1.35; min-height: 2.7em; overflow-wrap: anywhere; }
+  .hearing.idle { color: var(--muted); font-size: 18px; font-style: italic; }
+  .progress { height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; margin-top: 10px; display: none; }
+  .progress div { height: 100%; width: 0; background: var(--wake); }
+  .tx { list-style: none; margin: 0; padding: 0; }
+  .tx li { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .tx li:last-child { border-bottom: 0; }
+  .tx .text { font-size: 17px; overflow-wrap: anywhere; }
+  .tx .meta { color: var(--muted); font-size: 12px; font-family: var(--mono); margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  .tx .wake-row .text { color: var(--wake); font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ASR &middot; After &ldquo;Khus Khus&rdquo;</h1>
+  <span id="link" class="pill bad">Server offline</span>
+  <span class="spacer"></span>
+  <span id="model" class="pill">model: &mdash;</span>
+</header>
+<main>
+  <div class="banner off" id="banner">
+    <div class="dot"></div>
+    <div><div class="title" id="banner-title">Connecting to server&hellip;</div><div class="sub" id="banner-sub">&nbsp;</div></div>
+  </div>
+
+  <section class="panel">
+    <h2>Hearing now <span id="partial-lat"></span></h2>
+    <div class="hearing idle" id="hearing">Say &ldquo;Khus Khus&rdquo;, then your command.</div>
+    <div class="progress" id="progress"><div></div></div>
+  </section>
+
+  <section class="panel">
+    <h2>Transcripts <button id="clear">Clear</button></h2>
+    <ul class="tx" id="tx"><li class="empty">No transcripts yet.</li></ul>
+  </section>
+</main>
+<script src="live.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+
+function banner(cls, title, sub = " ") {
+  $("banner").className = "banner " + cls;
+  $("banner-title").textContent = title;
+  $("banner-sub").textContent = sub;
+}
+function hearing(text) {
+  $("hearing").className = text ? "hearing" : "hearing idle";
+  $("hearing").textContent = text || "Say “Khus Khus”, then your command.";
+}
+function addRow(html, cls = "") {
+  const ul = $("tx");
+  if (ul.firstElementChild?.classList.contains("empty")) ul.innerHTML = "";
+  const li = document.createElement("li");
+  li.className = cls;
+  li.innerHTML = html;
+  ul.prepend(li);
+  return li;
+}
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+$("clear").onclick = () => { $("tx").innerHTML = '<li class="empty">No transcripts yet.</li>'; };
+
+function showStage(stage, model, device) {
+  $("progress").style.display = "none";
+  if (model) Live.setPill($("model"), "wake", "model: " + model);
+  switch (stage) {
+    case "waiting":
+      banner("off", "No audio device connected", "Start test_client.py (laptop mic) or power the ESP32"); break;
+    case "standby":
+      banner("standby", "Standby: say “Khus Khus”", device ? `Audio from ${device}` : ""); hearing(""); break;
+    case "choosing":
+      banner("busy", "Wake word heard!", "Pick the ASR model (1/2) in the server terminal"); break;
+    case "listening":
+      banner("awake", "Awake: speak your command", `${model} is transcribing live`);
+      if (model === "Whisper") $("progress").style.display = "block";
+      break;
+    case "transcribing":
+      banner("busy", "Running Whisper…", "Large-v3-Turbo, first run downloads the model"); break;
+  }
+}
+
+let device = null;
+Live.onLink((up) => {
+  Live.setPill($("link"), up ? "ok" : "bad", up ? "Server online" : "Server offline: reconnecting…");
+  if (!up) banner("off", "Server offline", "Waiting for server.py…");
+});
+Live.on("state", (e) => {
+  device = e.device;
+  if (e.asr_mode) Live.setPill($("model"), "", e.asr_mode === "ask" ? "model: chosen per wake" : "model: " + e.asr_mode);
+  showStage(e.stage, e.model, device);
+});
+Live.on("device_connected", (e) => { device = e.client; });
+Live.on("device_disconnected", () => { device = null; });
+Live.on("stage", (e) => showStage(e.stage, e.model, device));
+Live.on("wake", (e) => {
+  addRow(`<div class="text">⚡ Wake word “Khus Khus”</div>
+    <div class="meta"><span>${esc(e.at.split(" ")[1])}</span><span>conf ${(e.conf * 100).toFixed(1)}%</span><span>KWS ${e.latency_ms.toFixed(1)} ms</span></div>`, "wake-row");
+});
+Live.on("partial", (e) => {
+  hearing(e.text);
+  $("partial-lat").textContent = `model ${e.latency_ms.toFixed(0)} ms`;
+});
+Live.on("whisper_progress", (e) => {
+  $("progress").firstElementChild.style.width = Math.min(100, e.captured_s / e.total_s * 100) + "%";
+  hearing(`Recording… ${e.captured_s.toFixed(1)} s / ${e.total_s.toFixed(1)} s`);
+});
+Live.on("final", (e) => {
+  hearing("");
+  const meta = [Live.clock(e.ts), e.model];
+  if (e.latency_ms != null) meta.push(`latency ${e.latency_ms.toFixed(0)} ms`);
+  if (e.duration_s) meta.push(`audio ${e.duration_s.toFixed(2)} s`);
+  if (e.rtf) meta.push(`RTF ${e.rtf.toFixed(2)}`);
+  if (e.flushed) meta.push("flushed on disconnect");
+  addRow(`<div class="text">${esc(e.text || "(empty)")}</div>
+    <div class="meta">${meta.map((m) => `<span>${esc(m)}</span>`).join("")}</div>`);
+});
+Live.on("error", (e) => addRow(`<div class="text bad-text">Error: ${esc(e.message)}</div>`));
+</script>
+</body>
+</html>
