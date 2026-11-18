@@ -40,7 +40,7 @@ def _load_env_file():
 _load_env_file()
 
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_MODEL = "llama-3.1-8b-instant"
+DEFAULT_MODEL = "qwen/qwen3.8-27b"
 
 SYSTEM_PROMPT = (
     "You are an ultra-fast, helpful voice assistant for an ESP32 smart edge system. "
@@ -136,6 +136,34 @@ class GroqVoiceBrain:
         if not self.api_key:
             return self._offline_tool_router(user_clean, t0)
 
+        # Smart Fast Injection for Live Weather & Real-Time Data (Sub-300ms single round-trip)
+        lower = user_clean.lower()
+        tool_used = None
+        user_prompt = user_clean
+
+        if any(w in lower for w in ("weather", "temperature", "forecast", "rain", "climate", "hot", "cold")):
+            tool_used = "get_current_weather"
+            words = lower.replace("?", "").replace(".", "").split()
+            city = os.environ.get("DEFAULT_WEATHER_CITY", "Delhi")
+            if "in" in words:
+                idx = words.index("in")
+                if idx + 1 < len(words):
+                    city = " ".join(words[idx + 1:])
+            live_weather = get_live_weather(city)
+            user_prompt = (
+                f"User asked: '{user_clean}'. The current live weather data is: {live_weather}. "
+                f"Give a friendly, natural 1-sentence spoken answer."
+            )
+
+        elif any(w in lower for w in ("time", "clock", "date", "today", "day")):
+            tool_used = "get_current_time"
+            now = datetime.now()
+            time_str = f"Current time is {now.strftime('%I:%M %p')} on {now.strftime('%A, %B %d, %Y')}."
+            user_prompt = (
+                f"User asked: '{user_clean}'. The live system time is: {time_str}. "
+                f"Give a short 1-sentence spoken answer."
+            )
+
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -144,19 +172,16 @@ class GroqVoiceBrain:
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_clean}
+            {"role": "user", "content": user_prompt}
         ]
 
         payload = {
             "model": self.model,
             "messages": messages,
-            "tools": TOOLS_SCHEMA,
-            "tool_choice": "auto",
-            "max_tokens": 150,
-            "temperature": 0.4
+            "max_tokens": 120,
+            "temperature": 0.3
         }
 
-        tool_used = None
         try:
             req_data = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(GROQ_ENDPOINT, data=req_data, headers=headers, method="POST")
@@ -165,44 +190,7 @@ class GroqVoiceBrain:
                 result = json.loads(resp.read().decode("utf-8"))
 
             choice = result["choices"][0]
-            message = choice["message"]
-
-            # Handle Tool Calls
-            if message.get("tool_calls"):
-                tool_call = message["tool_calls"][0]
-                fn_name = tool_call["function"]["name"]
-                fn_args_raw = tool_call["function"].get("arguments", "{}")
-                try:
-                    fn_args = json.loads(fn_args_raw)
-                except Exception:
-                    fn_args = {}
-
-                tool_used = fn_name
-                tool_result_str = execute_local_tool(fn_name, fn_args)
-
-                # Send tool output back to Groq for natural spoken synthesis
-                messages.append(message)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "content": tool_result_str
-                })
-
-                follow_up_payload = {
-                    "model": self.model,
-                    "messages": messages,
-                    "max_tokens": 150,
-                    "temperature": 0.3
-                }
-
-                follow_up_data = json.dumps(follow_up_payload).encode("utf-8")
-                follow_up_req = urllib.request.Request(GROQ_ENDPOINT, data=follow_up_data, headers=headers, method="POST")
-
-                with urllib.request.urlopen(follow_up_req, timeout=8) as f_resp:
-                    follow_up_res = json.loads(f_resp.read().decode("utf-8"))
-                    final_text = follow_up_res["choices"][0]["message"]["content"].strip()
-            else:
-                final_text = message.get("content", "").strip()
+            final_text = choice["message"].get("content", "").strip()
 
             t1 = time.perf_counter()
             return {
@@ -214,10 +202,10 @@ class GroqVoiceBrain:
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8") if e.fp else str(e)
             print(f"[Groq Client] HTTP error {e.code}: {err_body}")
-            # Graceful fallback to offline router
             return self._offline_tool_router(user_clean, t0, warning="Groq API key error. Using direct tools.")
         except Exception as e:
             print(f"[Groq Client] Network error: {e}")
+            return self._offline_tool_router(user_clean, t0, warning="Network unreachable. Using direct tools.")
             return self._offline_tool_router(user_clean, t0, warning="Network unreachable. Using direct tools.")
 
     def _offline_tool_router(self, user_text: str, t0: float, warning: Optional[str] = None) -> Dict[str, Any]:

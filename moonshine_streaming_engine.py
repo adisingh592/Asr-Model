@@ -121,6 +121,34 @@ class MoonshineStreamingEngine:
 
         return self.last_partial_text if self.last_partial_text else None, chunk_compute_ms
 
+    def transcribe_audio(self, raw_pcm16_bytes: bytes) -> str:
+        """
+        Transcribes a complete PCM16 audio buffer at lightning speed (tens of ms).
+        Ideal for voice assistant question transcription.
+        """
+        self.reset()
+        if not raw_pcm16_bytes:
+            return ""
+
+        # Feed in chunks
+        for i in range(0, len(raw_pcm16_bytes), self.CHUNK_BYTES):
+            self.process_pcm_chunk(raw_pcm16_bytes[i:i + self.CHUNK_BYTES])
+
+        # Flush any remaining remainder samples
+        if len(self.audio_accumulator) > 0:
+            samples = np.frombuffer(self.audio_accumulator, dtype=np.int16).astype(np.float32) / 32768.0
+            samples = samples - np.mean(samples)
+            self.stream.add_audio(samples.tolist(), self.sample_rate)
+            self.stream.update_transcription()
+            self.audio_accumulator.clear()
+
+        # Gather final text
+        parts = [t.strip() for t in self.final_transcripts if t.strip()]
+        if self.last_partial_text and self.last_partial_text.strip() not in parts:
+            parts.append(self.last_partial_text.strip())
+
+        return " ".join(parts).strip()
+
 
 if __name__ == "__main__":
     print("=" * 60)

@@ -338,13 +338,14 @@ async def tcp_handler(reader, writer):
                     audio_snap = bytes(whisper_post_wake_buffer)
 
                     if active_model_choice == 2:
-                        # --- VOICE AI ASSISTANT PIPELINE ---
-                        print(f'\n[*] Transcribing your question ({len(audio_snap)/32000.0:.2f}s audio)...')
+                        # --- VOICE AI ASSISTANT PIPELINE (Moonshine Ultra-Fast STT) ---
+                        t_stt_0 = time.perf_counter()
+                        print(f'\n[*] Transcribing question with Moonshine Edge ASR ({len(audio_snap)/32000.0:.2f}s audio)...')
                         set_stage('transcribing', model='Assistant')
 
-                        adapter = get_whisper_adapter()
-                        res = adapter.transcribe(audio_snap, sample_rate=16000)
-                        question_text = res.get('transcript', '').strip()
+                        question_text = moonshine_engine.transcribe_audio(audio_snap)
+                        stt_lat_ms = (time.perf_counter() - t_stt_0) * 1000.0
+                        print(f'[*] STT Completed in {stt_lat_ms:.1f} ms!')
 
                         if not question_text:
                             print('[-] No audible question detected. Returning to standby.\n')
@@ -353,8 +354,9 @@ async def tcp_handler(reader, writer):
                             print('              🎙️ VOICE ASSISTANT QUERY')
                             print('=' * 65)
                             print(f'  User Asked : "{question_text}"')
-                            log_transcript(f'Question: {question_text}', wake_detected=False, model_name='User')
-                            emit('final', text=question_text, model='User', latency_ms=res.get('total_asr_latency_ms', 0.0))
+                            print(f'  STT Latency: {stt_lat_ms:.1f} ms')
+                            log_transcript(f'Question: {question_text} (STT: {stt_lat_ms:.1f}ms)', wake_detected=False, model_name='User')
+                            emit('final', text=question_text, model='User', latency_ms=stt_lat_ms)
 
                             set_stage('thinking', model='Assistant')
                             assistant_res = voice_assistant.process_command_text(question_text)
@@ -365,7 +367,7 @@ async def tcp_handler(reader, writer):
                             print(f'  Answer     : "{answer_text}"')
                             if tool_used:
                                 print(f'  Tool Called: {tool_used}')
-                            print(f'  Latency    : {lat:.1f} ms')
+                            print(f'  Groq Time  : {lat:.1f} ms')
                             print('=' * 65 + '\n')
 
                             log_transcript(f'Answer: {answer_text} (Latency: {lat:.1f}ms)', wake_detected=False, model_name='Assistant')

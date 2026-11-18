@@ -140,19 +140,18 @@ def run_quick_diagnostics(assistant: VoiceAssistant):
 
 def run_direct_voice_test(assistant: VoiceAssistant, device: int, rate: int, decimate: Decimator):
     """Directly records question from mic, transcribes, and speaks response."""
-    # Lazy load Whisper Turbo
-    from whisper_asr.whisper_engine import WhisperTurboASREngine
-    print("[*] Loading Whisper Large-v3-Turbo speech recognizer...")
-    asr_engine = WhisperTurboASREngine(backend="onnx", language="en")
+    from moonshine_streaming_engine import MoonshineStreamingEngine
+    print("[*] Loading Ultra-Fast Moonshine Streaming ASR Engine...")
+    asr_engine = MoonshineStreamingEngine(language="en")
 
     print("\n" + "=" * 65)
-    print("  🎙️ DIRECT LAPTOP MIC VOICE ASSISTANT TEST")
+    print("  🎙️ DIRECT LAPTOP MIC VOICE ASSISTANT TEST (Moonshine + Groq)")
     print("=" * 65)
     print("Instructions:")
     print("  1. Press Enter when ready.")
     print("  2. Speak your question into the laptop mic for 4 seconds.")
     print("     (Examples: 'What is the weather in Delhi?', 'What time is it?')")
-    print("  3. The assistant will transcribe, call Groq, and speak the reply.")
+    print("  3. The assistant will transcribe with Moonshine, query Groq, and speak.")
     print("-" * 65)
 
     while True:
@@ -165,9 +164,11 @@ def run_direct_voice_test(assistant: VoiceAssistant, device: int, rate: int, dec
         print("\n[*] 🔴 RECORDING NOW - Speak into your laptop microphone...")
         pcm_bytes = record_seconds(duration_sec=4.0, device=device, rate=rate, decimate=decimate)
 
-        print("\n[*] Transcribing audio with Whisper...")
-        asr_result = asr_engine.transcribe(pcm_bytes, sample_rate=16000)
-        query = asr_result.get("transcript", "").strip()
+        t_stt_0 = time.perf_counter()
+        print("\n[*] Transcribing audio with Moonshine Edge ASR...")
+        query = asr_engine.transcribe_audio(pcm_bytes)
+        stt_ms = (time.perf_counter() - t_stt_0) * 1000.0
+        print(f"[*] Transcription completed in {stt_ms:.1f} ms!")
 
         if not query:
             print("[-] No speech detected. Try speaking louder or moving closer to mic.\n")
@@ -185,7 +186,7 @@ def run_wake_word_test(assistant: VoiceAssistant, device: int, rate: int, decima
     from kws.config import AUDIO_CFG, MODEL_CFG
     from kws.features import LogMelFeatureExtractor
     from kws.model import KhusKhusKWS
-    from whisper_asr.whisper_engine import WhisperTurboASREngine
+    from moonshine_streaming_engine import MoonshineStreamingEngine
 
     print("\n[*] Loading KWS Wake Word Model ('Khus Khus')...")
     device_torch = torch.device('cpu')
@@ -203,8 +204,8 @@ def run_wake_word_test(assistant: VoiceAssistant, device: int, rate: int, decima
         print(f"[-] KWS checkpoint not found at {kws_path}")
         return
 
-    print("[*] Loading Whisper Large-v3-Turbo speech recognizer...")
-    asr_engine = WhisperTurboASREngine(backend="onnx", language="en")
+    print("[*] Loading Ultra-Fast Moonshine Streaming ASR Engine...")
+    asr_engine = MoonshineStreamingEngine(language="en")
 
     print("\n" + "=" * 65)
     print("  ⚡ FULL WAKE-WORD ('Khus Khus') + VOICE ASSISTANT TEST")
@@ -254,9 +255,11 @@ def run_wake_word_test(assistant: VoiceAssistant, device: int, rate: int, decima
                     print("\n[*] 🔴 RECORDING QUESTION (Speak now for 4.0 seconds)...")
                     q_pcm = record_seconds(duration_sec=4.0, device=device, rate=rate, decimate=decimate)
 
-                    print("\n[*] Transcribing your question...")
-                    asr_res = asr_engine.transcribe(q_pcm, sample_rate=16000)
-                    q_text = asr_res.get("transcript", "").strip()
+                    t_stt_0 = time.perf_counter()
+                    print("\n[*] Transcribing your question with Moonshine...")
+                    q_text = asr_engine.transcribe_audio(q_pcm)
+                    stt_ms = (time.perf_counter() - t_stt_0) * 1000.0
+                    print(f"[*] Transcribed in {stt_ms:.1f} ms!")
 
                     if q_text:
                         print(f"\n[🎙️ Question]: \"{q_text}\"")
