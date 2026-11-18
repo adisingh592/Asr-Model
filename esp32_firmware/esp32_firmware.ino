@@ -9,11 +9,11 @@
 #include <driver/i2s.h>
 
 // WiFi Configuration
-const char *WIFI_SSID = "wifi Name";
-const char *WIFI_PASSWORD = "PASSWORD";
+const char *WIFI_SSID = "ME'S Pixel 7";
+const char *WIFI_PASSWORD = "12345678";
 
 // Server Configuration (Laptop IP running server.py)
-const char *SERVER_IP = "10.118.171.70";
+const char *SERVER_IP = "10.229.34.701";
 const uint16_t SERVER_PORT = 8766;
 
 // Confirmed working I2S pins for INMP441

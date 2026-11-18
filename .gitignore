@@ -76,3 +76,10 @@ venv.bak/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 11. Large Model Binaries (Whisper ONNX & TFLite data > 100MB)
+*.onnx
+*.onnx.data
+models/whisper/
+whisper_asr/models/
+

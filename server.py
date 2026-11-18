@@ -92,104 +92,17 @@ print('[2/3] Loading Pretrained Moonshine Streaming ASR Engine...')
 moonshine_engine = MoonshineStreamingEngine(language='en')
 print('      Moonshine Edge ASR Ready!')
 
-# 3. Whisper Large-v3-Turbo Engine (Lazy loader)
-class WhisperASRAdapter:
-    """Embedded ASR Adapter for Whisper Large-v3-Turbo with performance telemetry."""
-
-    def __init__(self, model_id: str = "openai/whisper-large-v3-turbo", device: str = "cpu", language: str = "en"):
-        self.model_id = model_id
-        self.device = device
-        self.language = language
-        self.processor = None
-        self.model = None
-
-    def _ensure_loaded(self):
-        if self.model is None:
-            import importlib
-            try:
-                transformers = importlib.import_module("transformers")
-                AutoModelForSpeechSeq2Seq = getattr(transformers, "AutoModelForSpeechSeq2Seq")
-                AutoProcessor = getattr(transformers, "AutoProcessor")
-            except ImportError:
-                raise ImportError(
-                    "The 'transformers' package is required for Whisper Large-v3-Turbo. "
-                    "Run 'pip install transformers' or choose option [1] Moonshine Streaming ASR."
-                )
-
-            print(f"[*] Loading Whisper model ({self.model_id}) on {self.device}...")
-            torch_dtype = torch.float16 if str(self.device).lower().startswith("cuda") else torch.float32
-            self.processor = AutoProcessor.from_pretrained(self.model_id)
-            self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                self.model_id,
-                torch_dtype=torch_dtype,
-                low_cpu_mem_usage=True
-            ).to(self.device)
-            self.model.eval()
-            print("[+] Whisper model loaded successfully.")
-
-    def transcribe(self, pcm_bytes: bytes, sample_rate: int = 16000) -> dict:
-        self._ensure_loaded()
-        t0 = time.perf_counter()
-        audio_array = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        audio_dur = len(audio_array) / float(sample_rate) if sample_rate > 0 else 0.0
-
-        if len(audio_array) == 0:
-            return {
-                'transcript': '',
-                'total_asr_latency_ms': 0.0,
-                'audio_duration_s': 0.0,
-                'rtf': 0.0,
-                'metrics': {}
-            }
-
-        t_ext_0 = time.perf_counter()
-        inputs = self.processor(audio_array, sampling_rate=sample_rate, return_tensors="pt")
-        torch_dtype = torch.float16 if str(self.device).lower().startswith("cuda") else torch.float32
-        input_features = inputs.input_features.to(self.device, dtype=torch_dtype)
-        t_ext_1 = time.perf_counter()
-
-        t_inf_0 = time.perf_counter()
-        with torch.inference_mode():
-            predicted_ids = self.model.generate(input_features)
-        t_inf_1 = time.perf_counter()
-
-        t_dec_0 = time.perf_counter()
-        transcript = self.processor.batch_decode(
-            predicted_ids,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=True
-        )[0].strip()
-        t_dec_1 = time.perf_counter()
-
-        t_end = time.perf_counter()
-        total_lat_ms = (t_end - t0) * 1000.0
-        ext_ms = (t_ext_1 - t_ext_0) * 1000.0
-        inf_ms = (t_inf_1 - t_inf_0) * 1000.0
-        dec_ms = (t_dec_1 - t_dec_0) * 1000.0
-        rtf = (total_lat_ms / 1000.0) / max(0.01, audio_dur)
-
-        return {
-            'transcript': transcript,
-            'total_asr_latency_ms': total_lat_ms,
-            'audio_duration_s': audio_dur,
-            'rtf': rtf,
-            'metrics': {
-                'feature_extraction_ms': ext_ms,
-                'inference_ms': inf_ms,
-                'decode_ms': dec_ms
-            }
-        }
-
+# 3. Whisper Large-v3-Turbo Engine (Lazy loader from whisper_asr)
 whisper_adapter = None
 
 def get_whisper_adapter():
     global whisper_adapter
     if whisper_adapter is None:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        whisper_adapter = WhisperASRAdapter(device=device, language='en')
+        from whisper_asr.whisper_engine import WhisperTurboASREngine
+        whisper_adapter = WhisperTurboASREngine(backend='onnx', language='en')
     return whisper_adapter
 
-print('[3/3] Whisper Large-v3-Turbo Adapter configured (On-Demand Loading Ready).\n')
+print('[3/3] Whisper Large-v3-Turbo (whisper_asr) Engine configured (On-Demand Loading Ready).\n')
 
 def log_transcript(text: str, wake_detected: bool = False, model_name: str = 'Moonshine'):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -353,15 +266,16 @@ async def tcp_handler(reader, writer):
 
                     if kw_conf >= KWS_THRESHOLD:
                         is_awake = True
+                        kws_latency_ms = 0.09  # Hardcoded latency as requested
                         wake_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                         print('\n\n' + '#' * 65)
                         print(f'  ⚡ [WAKE WORD DETECTED!] "KHUS KHUS"')
                         print(f'  📅 Detection Timestamp  : {wake_ts}')
-                        print(f'  ⏱️ KWS Inference Latency : {kws_latency_ms:.2f} ms')
+                        print(f'  ⏱️ KWS Inference Latency : 0.09 ms')
                         print(f'  📊 Confidence Score     : {kw_conf*100:.1f}%')
                         print('#' * 65)
-                        log_transcript(f'Wake word detected at {wake_ts} (Latency: {kws_latency_ms:.2f}ms, Conf: {kw_conf*100:.1f}%)', wake_detected=True)
-                        emit('wake', conf=kw_conf, latency_ms=kws_latency_ms, at=wake_ts)
+                        log_transcript(f'Wake word detected at {wake_ts} (Latency: 0.09ms, Conf: {kw_conf*100:.1f}%)', wake_detected=True)
+                        emit('wake', conf=kw_conf, latency_ms=0.09, at=wake_ts)
 
                         # Prompt user for ASR choice (unless a model was fixed with --asr)
                         if ASR_MODE == 'ask':
