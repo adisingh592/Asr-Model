@@ -360,6 +360,18 @@ Connect the **INMP441 MEMS microphone** module to the **ESP32-S3** board as foll
    pip install -r requirements.txt
    ```
 
+4. **Configure Environment Variables (`.env`)**:
+   - Create your local `.env` by copying the template:
+     ```bash
+     cp .env.example .env
+     ```
+   - Get a free API key at [console.groq.com/keys](https://console.groq.com/keys) (instant sign-up with Google/GitHub, no credit card required).
+   - Open `.env` and paste your key:
+     ```env
+     GROQ_API_KEY=gsk_your_key_here
+     ```
+   *(Note: The `.env` file is gitignored to keep your credentials completely private.)*
+
 ### 2. ESP32-S3 Firmware Configuration & Flashing
 
 1. Open `esp32_firmware/esp32_firmware.ino` in **Arduino IDE** or **VS Code (PlatformIO)**.

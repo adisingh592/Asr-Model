@@ -83,3 +83,10 @@ desktop.ini
 models/whisper/
 whisper_asr/models/
 
+# 12. Environment Variables & Secret API Keys
+.env
+.env.*
+*.env
+!.env.example
+
+

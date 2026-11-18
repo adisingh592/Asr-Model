@@ -47,8 +47,8 @@ from voice_assistant import VoiceAssistant
 LOG_FILE = 'live_transcript_log.txt'
 KWS_THRESHOLD = 0.40
 
-# ASR model used after the wake word: 'ask' prompts in the terminal, or force one model
-ASR_MODE = 'ask'
+# Operating mode after wake word: 'ask' prompts in the terminal, or force one model via CLI / .env
+ASR_MODE = os.environ.get('DEFAULT_ASR_MODE', 'ask')
 
 # =====================================================================
 # 1. Model Initialization
