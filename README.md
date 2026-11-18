@@ -1,13 +1,17 @@
-# ESP32-S3 AI Voice Assistant: Dual ASR & TinyML Keyword Spotting
+# ESP32-S3 AI Voice Assistant: Dual ASR, TinyML KWS & Groq AI Assistant
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Hardware](https://img.shields.io/badge/Hardware-ESP32--S3%20%7C%20INMP441-orange.svg)](https://www.espressif.com/en/products/socs/esp32-s3)
 [![PyTorch](https://img.shields.io/badge/KWS-PyTorch%20%7C%20TFLite%20Micro-EE4C2C.svg)](https://pytorch.org/)
+[![Groq](https://img.shields.io/badge/Voice%20AI-Groq%20Cloud%20(Llama--3.1)-blueviolet.svg)](https://groq.com/)
 [![Moonshine](https://img.shields.io/badge/Streaming%20ASR-Moonshine%20Voice-green.svg)](https://github.com/usefulsensors/moonshine)
 [![Whisper](https://img.shields.io/badge/Offline%20ASR-Whisper%20Large--v3--Turbo-red.svg)](https://huggingface.co/openai/whisper-large-v3-turbo)
 [![Latency](https://img.shields.io/badge/KWS%20Latency-%3C0.1ms-brightgreen.svg)](#performance-benchmarks--specifications)
 
-An end-to-end, edge-to-server speech recognition system combining **ESP32-S3 Wi-Fi audio streaming**, an ultra-low-latency custom **1D Depthwise-Separable CNN Keyword Spotting (KWS)** model (*"Khus Khus"*), and an **Interactive Dual ASR Engine** featuring **Moonshine Streaming Voice** (real-time continuous edge streaming) and **Whisper Large-v3-Turbo** (high-accuracy hardware-accelerated ONNX inference with DSP noise filtration).
+An end-to-end, edge-to-server speech recognition and conversational AI system combining **ESP32-S3 Wi-Fi audio streaming**, an ultra-low-latency custom **1D Depthwise-Separable CNN Keyword Spotting (KWS)** model (*"Khus Khus"*), and a **Triple-Engine Operating Pipeline**:
+1. **Moonshine Streaming Voice**: Real-time edge streaming continuous transcription.
+2. **Voice AI Assistant (Groq Cloud API)**: Conversational voice assistant providing spoken real-time answers (Live Weather via Open-Meteo, Time/Date, and General Knowledge powered by Llama 3.1 8B).
+3. **Whisper Large-v3-Turbo**: High-accuracy hardware-accelerated ONNX speech recognition with 4th-order Butterworth DSP noise filtration.
 
 ---
 
@@ -79,20 +83,20 @@ The system splits compute workloads intelligently between the microcontroller ed
  │                                 ▼                                      │
  │                [Confidence >= 0.40: WAKE TRIGGERED]                    │
  │                                 │                                      │
- │                 ASR Engine Selection / Dispatch                        │
- │                 ┌───────────────┴───────────────┐                      │
- │                 ▼                               ▼                      │
- │  ┌─────────────────────────────┐  ┌─────────────────────────────────┐  │
- │  │  Engine 1: Moonshine Voice  │  │ Engine 2: Whisper Large Turbo   │  │
- │  │  • Real-time Edge Streaming │  │ • Butterworth 4th-order Filter  │  │
- │  │  • 100 ms chunk framing     │  │ • 3.5s command audio capture    │  │
- │  │  • DC-offset & soft norm    │  │ • 128-Mel feature processor     │  │
- │  │  • Sub-100 ms chunk latency │  │ • ONNX Runtime multi-threaded   │  │
- │  │  • Real-time partial text   │  │ • Anti-repetition / Halluc.     │  │
- │  └──────────────┬──────────────┘  └────────────────┬────────────────┘  │
- │                 │                                  │                   │
- │                 └─────────────────┬────────────────┘                   │
- │                                   ▼                                    │
+ │                 Operational Mode Selection / Dispatch                │
+ │        ┌─────────────────────────┼─────────────────────────┐        │
+ │        ▼                         ▼                         ▼        │
+ │ ┌───────────────┐       ┌─────────────────┐       ┌───────────────┐ │
+ │ │ Mode 1:       │       │ Mode 2:         │       │ Mode 3:       │ │
+ │ │ Moonshine     │       │ Voice AI        │       │ Whisper Large │ │
+ │ │ Streaming ASR │       │ Assistant       │       │ v3-Turbo      │ │
+ │ │ • Continuous  │       │ • Groq Llama3.1 │       │ • Butterworth │ │
+ │ │   real-time   │       │ • Live Weather  │       │   DSP filter  │ │
+ │ │ • Sub-100ms   │       │ • TTS Voice Out │       │ • ONNX Engine │ │
+ │ └───────┬───────┘       └────────┬────────┘       └───────┬───────┘ │
+ │         │                        │                        │         │
+ │         └────────────────────────┼────────────────────────┘         │
+ │                                  ▼                                  │
  │  ┌──────────────────────────────────────────────────────────────────┐  │
  │  │             Terminal Display & live_transcript_log.txt           │  │
  │  │        Timestamped transcripts, Latency (ms), RTF profiling      │  │
@@ -313,6 +317,13 @@ Connect the **INMP441 MEMS microphone** module to the **ESP32-S3** board as foll
 │   └── models/tflite/                # ONNX encoder & decoder weights
 │       ├── whisper_turbo_encoder.onnx & .onnx.data
 │       └── whisper_turbo_decoder.onnx & .onnx.data
+│
+├── voice_assistant/                  # Voice AI Assistant (Groq Cloud API & Tools)
+│   ├── __init__.py                   # Package exports
+│   ├── assistant_engine.py           # Core assistant coordinator (STT -> Groq -> TTS)
+│   ├── groq_client.py                # Ultra-fast Groq Cloud API with function calling
+│   ├── weather_tool.py               # Free live Open-Meteo weather resolver
+│   └── tts.py                        # Asynchronous non-blocking Speech Synthesizer
 │
 ├── moonshine_streaming_engine.py     # Moonshine Voice streaming ASR integration & callbacks
 ├── server.py                         # Central TCP socket server (port 8766) & dispatcher

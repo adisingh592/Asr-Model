@@ -42,6 +42,7 @@ from kws.config import AUDIO_CFG, MODEL_CFG, AudioConfig, ModelConfig
 from kws.features import LogMelFeatureExtractor
 from kws.model import KhusKhusKWS
 from moonshine_streaming_engine import MoonshineStreamingEngine
+from voice_assistant import VoiceAssistant
 
 LOG_FILE = 'live_transcript_log.txt'
 KWS_THRESHOLD = 0.40
@@ -102,7 +103,12 @@ def get_whisper_adapter():
         whisper_adapter = WhisperTurboASREngine(backend='onnx', language='en')
     return whisper_adapter
 
-print('[3/3] Whisper Large-v3-Turbo (whisper_asr) Engine configured (On-Demand Loading Ready).\n')
+print('[3/4] Whisper Large-v3-Turbo (whisper_asr) Engine configured (On-Demand Loading Ready).')
+
+# 4. Voice AI Assistant Engine (Groq Cloud API & Tools)
+print('[4/4] Initializing Voice AI Assistant (Groq Cloud API)...')
+voice_assistant = VoiceAssistant()
+print('      Voice AI Assistant Ready!\n')
 
 def log_transcript(text: str, wake_detected: bool = False, model_name: str = 'Moonshine'):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -151,15 +157,16 @@ async def prompt_for_asr_choice() -> int:
             print('\n' + '=' * 50)
             print('  ⚡ WAKE WORD DETECTED: "Khus Khus"')
             print('=' * 50)
-            print('Select ASR Model for Command Transcription:')
-            print('  [1] Moonshine Streaming Tiny')
-            print('  [2] Whisper Large-v3-Turbo')
+            print('Select Operating Mode:')
+            print('  [1] Moonshine Streaming ASR (Continuous Transcription)')
+            print('  [2] Voice AI Assistant (Groq: Weather, Time, Q&A)')
+            print('  [3] Whisper Large-v3-Turbo ASR')
             print('-' * 50)
             try:
-                c = input('Enter choice (1 or 2): ').strip()
-                if c in ['1', '2']:
+                c = input('Enter choice (1, 2, or 3): ').strip()
+                if c in ['1', '2', '3']:
                     return int(c)
-                print('Invalid choice. Please enter 1 or 2.')
+                print('Invalid choice. Please enter 1, 2, or 3.')
             except (EOFError, KeyboardInterrupt):
                 return 1
     return await asyncio.to_thread(_input_sync)
@@ -277,12 +284,17 @@ async def tcp_handler(reader, writer):
                         log_transcript(f'Wake word detected at {wake_ts} (Latency: 0.09ms, Conf: {kw_conf*100:.1f}%)', wake_detected=True)
                         emit('wake', conf=kw_conf, latency_ms=0.09, at=wake_ts)
 
-                        # Prompt user for ASR choice (unless a model was fixed with --asr)
+                        # Prompt user for operation mode (unless fixed with --asr or --mode)
                         if ASR_MODE == 'ask':
                             set_stage('choosing')
                             choice = await prompt_for_asr_choice()
                         else:
-                            choice = 1 if ASR_MODE == 'moonshine' else 2
+                            if ASR_MODE in ('moonshine', '1'):
+                                choice = 1
+                            elif ASR_MODE in ('assistant', '2'):
+                                choice = 2
+                            else:
+                                choice = 3
                         active_model_choice = choice
 
                         if choice == 1:
@@ -291,6 +303,14 @@ async def tcp_handler(reader, writer):
                             moonshine_engine.reset()
                             # Feed pre-roll audio buffer into Moonshine
                             moonshine_engine.process_pcm_chunk(bytes(audio_buffer))
+                        elif choice == 2:
+                            print(f'\n[+] Voice AI Assistant Activated! (Groq Cloud API)')
+                            print(f'[*] Speak your question now (e.g. "What is the weather in Delhi?", "What time is it?")...')
+                            set_stage('listening', model='Assistant')
+                            whisper_post_wake_buffer.clear()
+                            whisper_post_wake_buffer.extend(audio_buffer) # preserve pre-roll
+                            is_collecting_whisper = True
+                            whisper_collect_start = time.time()
                         else:
                             print(f'\n[+] Whisper Large-v3-Turbo Selected! Buffering command speech ({WHISPER_CAPTURE_SEC}s)...')
                             set_stage('listening', model='Whisper')
@@ -305,49 +325,92 @@ async def tcp_handler(reader, writer):
             elif is_awake and active_model_choice == 1:
                 moonshine_engine.process_pcm_chunk(chunk)
 
-            # --- STAGE 2: Whisper Large-v3-Turbo Buffering Mode ---
-            elif is_awake and active_model_choice == 2 and is_collecting_whisper:
+            # --- STAGE 2: Voice Assistant or Whisper Buffering Mode ---
+            elif is_awake and active_model_choice in (2, 3) and is_collecting_whisper:
                 whisper_post_wake_buffer.extend(chunk)
                 dur = len(whisper_post_wake_buffer) / 32000.0
-                print(f'  🎙️ [Buffering Whisper Audio] Mic: [{level_str}] Captured: {dur:4.2f}s / {WHISPER_CAPTURE_SEC:.1f}s', end='\r', flush=True)
+                tag_label = "Voice Assistant Audio" if active_model_choice == 2 else "Whisper Audio"
+                print(f'  🎙️ [Buffering {tag_label}] Mic: [{level_str}] Captured: {dur:4.2f}s / {WHISPER_CAPTURE_SEC:.1f}s', end='\r', flush=True)
                 emit('whisper_progress', captured_s=dur, total_s=WHISPER_CAPTURE_SEC)
 
                 if (current_time - whisper_collect_start) >= WHISPER_CAPTURE_SEC:
                     is_collecting_whisper = False
                     audio_snap = bytes(whisper_post_wake_buffer)
-                    print(f'\n[*] Running Whisper Large-v3-Turbo on {len(audio_snap)/32000.0:.2f}s audio...')
-                    set_stage('transcribing', model='Whisper')
 
-                    adapter = get_whisper_adapter()
-                    res = adapter.transcribe(audio_snap, sample_rate=16000)
-                    
-                    ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-                    transcript_text = res.get('transcript', '')
-                    total_lat = res.get('total_asr_latency_ms', 0.0)
-                    audio_dur = res.get('audio_duration_s', len(audio_snap)/32000.0)
-                    rtf = res.get('rtf', 0.0)
-                    metrics = res.get('metrics', {})
-                    
-                    print('\n' + '=' * 65)
-                    print('            🎯 WHISPER LARGE-V3-TURBO TRANSCRIPT')
-                    print('=' * 65)
-                    print(f'  Transcript     : "{transcript_text}"')
-                    print(f'  ASR Latency    : {total_lat:.2f} ms')
-                    if 'feature_extraction_ms' in metrics:
-                        print(f'  - Extraction   : {metrics["feature_extraction_ms"]:.2f} ms')
-                        print(f'  - Inference    : {metrics["inference_ms"]:.2f} ms')
-                        print(f'  - Decode       : {metrics["decode_ms"]:.2f} ms')
-                    print(f'  Audio Duration : {audio_dur:.2f} s')
-                    print(f'  RTF            : {rtf:.3f}x')
-                    print('=' * 65 + '\n')
-                    
-                    log_transcript(f'{transcript_text} (Latency: {total_lat:.1f}ms, RTF: {rtf:.2f})', wake_detected=False, model_name='Whisper')
-                    emit('final', text=transcript_text, model='Whisper', latency_ms=total_lat, duration_s=audio_dur, rtf=rtf)
+                    if active_model_choice == 2:
+                        # --- VOICE AI ASSISTANT PIPELINE ---
+                        print(f'\n[*] Transcribing your question ({len(audio_snap)/32000.0:.2f}s audio)...')
+                        set_stage('transcribing', model='Assistant')
 
-                    # Return to standby
-                    is_awake = False
-                    print('[+] Standby -> Listening for next wake word ("Khus Khus") from ESP32...\n')
-                    set_stage('standby')
+                        adapter = get_whisper_adapter()
+                        res = adapter.transcribe(audio_snap, sample_rate=16000)
+                        question_text = res.get('transcript', '').strip()
+
+                        if not question_text:
+                            print('[-] No audible question detected. Returning to standby.\n')
+                        else:
+                            print('\n' + '=' * 65)
+                            print('              🎙️ VOICE ASSISTANT QUERY')
+                            print('=' * 65)
+                            print(f'  User Asked : "{question_text}"')
+                            log_transcript(f'Question: {question_text}', wake_detected=False, model_name='User')
+                            emit('final', text=question_text, model='User', latency_ms=res.get('total_asr_latency_ms', 0.0))
+
+                            set_stage('thinking', model='Assistant')
+                            assistant_res = voice_assistant.process_command_text(question_text)
+                            answer_text = assistant_res.get('response_text', '')
+                            lat = assistant_res.get('latency_ms', 0.0)
+                            tool_used = assistant_res.get('tool_used')
+
+                            print(f'  Answer     : "{answer_text}"')
+                            if tool_used:
+                                print(f'  Tool Called: {tool_used}')
+                            print(f'  Latency    : {lat:.1f} ms')
+                            print('=' * 65 + '\n')
+
+                            log_transcript(f'Answer: {answer_text} (Latency: {lat:.1f}ms)', wake_detected=False, model_name='Assistant')
+                            emit('final', text=answer_text, model='Assistant', latency_ms=lat)
+
+                        # Return to standby
+                        is_awake = False
+                        print('[+] Standby -> Listening for next wake word ("Khus Khus") from ESP32...\n')
+                        set_stage('standby')
+
+                    else:
+                        # --- WHISPER TRANSCRIPTION PIPELINE ---
+                        print(f'\n[*] Running Whisper Large-v3-Turbo on {len(audio_snap)/32000.0:.2f}s audio...')
+                        set_stage('transcribing', model='Whisper')
+
+                        adapter = get_whisper_adapter()
+                        res = adapter.transcribe(audio_snap, sample_rate=16000)
+
+                        ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+                        transcript_text = res.get('transcript', '')
+                        total_lat = res.get('total_asr_latency_ms', 0.0)
+                        audio_dur = res.get('audio_duration_s', len(audio_snap)/32000.0)
+                        rtf = res.get('rtf', 0.0)
+                        metrics = res.get('metrics', {})
+
+                        print('\n' + '=' * 65)
+                        print('            🎯 WHISPER LARGE-V3-TURBO TRANSCRIPT')
+                        print('=' * 65)
+                        print(f'  Transcript     : "{transcript_text}"')
+                        print(f'  ASR Latency    : {total_lat:.2f} ms')
+                        if 'feature_extraction_ms' in metrics:
+                            print(f'  - Extraction   : {metrics["feature_extraction_ms"]:.2f} ms')
+                            print(f'  - Inference    : {metrics["inference_ms"]:.2f} ms')
+                            print(f'  - Decode       : {metrics["decode_ms"]:.2f} ms')
+                        print(f'  Audio Duration : {audio_dur:.2f} s')
+                        print(f'  RTF            : {rtf:.3f}x')
+                        print('=' * 65 + '\n')
+
+                        log_transcript(f'{transcript_text} (Latency: {total_lat:.1f}ms, RTF: {rtf:.2f})', wake_detected=False, model_name='Whisper')
+                        emit('final', text=transcript_text, model='Whisper', latency_ms=total_lat, duration_s=audio_dur, rtf=rtf)
+
+                        # Return to standby
+                        is_awake = False
+                        print('[+] Standby -> Listening for next wake word ("Khus Khus") from ESP32...\n')
+                        set_stage('standby')
 
     except asyncio.CancelledError:
         pass
@@ -382,8 +445,8 @@ async def main():
         print(f'   ASR & KWS Server Running on {host}:{port}')
         print(f'   Live Dashboard Feed: ws://{DASHBOARD_HOST}:{DASHBOARD_PORT} (open dashboard/server.html)')
         print(f'   Trained Wake Model : KhusKhus-KWS (best_model.pth)')
-        print(f'   Dual ASR Engines   : [1] Moonshine Streaming Tiny  [2] Whisper Large-v3-Turbo')
-        print(f'   Post-Wake ASR Mode : {ASR_MODE}')
+        print(f'   Operating Modes    : [1] Moonshine Streaming ASR  [2] Voice AI Assistant (Groq)  [3] Whisper Turbo')
+        print(f'   Post-Wake Mode     : {ASR_MODE}')
         print(f'   Ready and waiting for ESP32 connection...')
         print('=' * 65 + '\n')
 
@@ -391,9 +454,9 @@ async def main():
             await server.serve_forever()
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='ESP32 KWS + ASR streaming server')
-    parser.add_argument('--asr', choices=['ask', 'moonshine', 'whisper'], default='ask',
-                        help='ASR model after the wake word (default: ask in the terminal)')
+    parser = argparse.ArgumentParser(description='ESP32 KWS + ASR + Voice Assistant streaming server')
+    parser.add_argument('--mode', '--asr', dest='asr', choices=['ask', 'moonshine', 'assistant', 'whisper'], default='ask',
+                        help='Operating mode after wake word (default: ask in the terminal)')
     ASR_MODE = parser.parse_args().asr
     try:
         asyncio.run(main())
