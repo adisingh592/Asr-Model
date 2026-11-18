@@ -325,6 +325,8 @@ Connect the **INMP441 MEMS microphone** module to the **ESP32-S3** board as foll
 │   ├── weather_tool.py               # Free live Open-Meteo weather resolver
 │   └── tts.py                        # Asynchronous non-blocking Speech Synthesizer
 │
+├── test_voice_assistant.py           # Standalone laptop mic test suite for Voice Assistant
+├── test_client.py                    # Laptop mic audio streaming client (stands in for ESP32)
 ├── moonshine_streaming_engine.py     # Moonshine Voice streaming ASR integration & callbacks
 ├── server.py                         # Central TCP socket server (port 8766) & dispatcher
 ├── requirements.txt                  # Python dependencies
@@ -433,9 +435,25 @@ Initialization output:
    --------------------------------------------------
    Enter choice (1 or 2):
    ```
-5. Choose your target engine:
-   * **[1] Moonshine Streaming**: Speak continuously; transcripts stream live onto the screen.
-   * **[2] Whisper Large-v3-Turbo**: Speak a command; the server buffers ~3.5 seconds of audio and transcribes with acoustic precision.
+5. Choose your operating mode:
+   * **[1] Moonshine Streaming ASR**: Speak continuously; transcripts stream live onto the screen.
+   * **[2] Voice AI Assistant**: Ask questions (e.g. *"What is the weather in Delhi?"*, *"What time is it?"*) and hear spoken answers.
+   * **[3] Whisper Large-v3-Turbo**: Speak a command; the server buffers ~3.5 seconds of audio and transcribes with high acoustic precision.
+
+### 5. Testing with Laptop Microphone (No ESP32 Required)
+
+You can test the entire voice assistant pipeline directly on your laptop without needing the ESP32 connected:
+
+```bash
+# 1. Direct Voice Test (Press Enter, speak question, hear spoken answer)
+python test_voice_assistant.py --mode direct
+
+# 2. Full Wake-Word Test (Say 'Khus Khus' into laptop mic -> speak question)
+python test_voice_assistant.py --mode wake
+
+# 3. Quick Diagnostics (Tests Weather API, Groq Brain & TTS Audio)
+python test_voice_assistant.py --mode diag
+```
 
 ---
 
