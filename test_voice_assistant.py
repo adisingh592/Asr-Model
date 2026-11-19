@@ -273,8 +273,8 @@ def run_wake_word_test(assistant: VoiceAssistant, device: int, rate: int, decima
 
 def main():
     parser = argparse.ArgumentParser(description="Test Voice Assistant on Laptop Microphone")
-    parser.add_argument("--mode", choices=["direct", "wake", "diag"], default="direct",
-                        help="'direct' (press enter and speak), 'wake' (say 'Khus Khus'), or 'diag' (quick diagnostic test)")
+    parser.add_argument("--mode", choices=["wake", "direct", "diag"], default="wake",
+                        help="'wake' (first wake word 'Khus Khus', then voice assistant), 'direct' (press enter and speak), or 'diag' (quick diagnostic test)")
     parser.add_argument("--device", type=int, default=None, help="Input microphone device index")
     args = parser.parse_args()
 
