@@ -34,29 +34,35 @@ def supported_rate(device):
 
 
 def pick_input_device():
-    """Returns (device_index, rate) of the input with the strongest signal.
+    """Returns (device_index, rate) of the active physical microphone."""
+    devices = sd.query_devices()
 
-    Unconnected inputs (e.g. an empty headset jack) still pass a faint noise floor, so
-    "not silent" is not enough; the live mic is the one with clearly the highest level.
-    """
-    best = (None, None, 0.0)
-    for idx, info in enumerate(sd.query_devices()):
-        if info['max_input_channels'] < 1:
-            continue
-        rate = supported_rate(idx)
-        if rate is None:
-            continue
-        try:
-            probe = sd.rec(int(rate * 0.6), samplerate=rate, channels=1, dtype='int16', device=idx)
-            sd.wait()
-        except Exception:
-            continue
-        settled = probe[int(rate * 0.1):, 0].astype(np.float32) / 32768.0   # skip start-up click
-        rms = float(np.sqrt(np.mean(settled ** 2)))
-        print(f"    probe [{idx}] {info['name']}: level {rms:.5f}")
-        if rms > best[2]:
-            best = (idx, rate, rms)
-    return best[0], best[1]
+    # 1. Prefer real microphone arrays or internal mics on stable APIs (MME, DirectSound, WASAPI)
+    for idx, d in enumerate(devices):
+        if d.get("max_input_channels", 0) > 0 and d.get("hostapi", -1) in (0, 1, 2):
+            name_lower = d["name"].lower()
+            if any(k in name_lower for k in ("microphone array", "smart sound", "realtek mic", "internal", "built-in")):
+                rate = supported_rate(idx)
+                if rate:
+                    return idx, rate
+
+    # 2. Prefer any real microphone (excluding speakers, stereo mix, midi)
+    for idx, d in enumerate(devices):
+        if d.get("max_input_channels", 0) > 0 and d.get("hostapi", -1) in (0, 1, 2):
+            name_lower = d["name"].lower()
+            if not any(b in name_lower for b in ("speaker", "output", "stereo mix", "wave", "midi", "mapper")):
+                rate = supported_rate(idx)
+                if rate:
+                    return idx, rate
+
+    # 3. Default input device if valid
+    default_dev = sd.default.device[0]
+    if default_dev is not None and default_dev >= 0:
+        rate = supported_rate(default_dev)
+        if rate:
+            return default_dev, rate
+
+    return None, None
 
 
 class Decimator:

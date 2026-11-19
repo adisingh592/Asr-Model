@@ -50,24 +50,35 @@ def supported_rate(device):
 
 
 def pick_input_device():
-    """Returns (device_index, rate) of the active microphone with strongest signal."""
-    best = (None, None, 0.0)
-    for idx, info in enumerate(sd.query_devices()):
-        if info['max_input_channels'] < 1:
-            continue
-        rate = supported_rate(idx)
-        if rate is None:
-            continue
-        try:
-            probe = sd.rec(int(rate * 0.4), samplerate=rate, channels=1, dtype='int16', device=idx)
-            sd.wait()
-        except Exception:
-            continue
-        settled = probe[int(rate * 0.1):, 0].astype(np.float32) / 32768.0
-        rms = float(np.sqrt(np.mean(settled ** 2)))
-        if rms > best[2]:
-            best = (idx, rate, rms)
-    return best[0], best[1]
+    """Returns (device_index, rate) of the active physical microphone."""
+    devices = sd.query_devices()
+
+    # 1. Prefer real microphone arrays or internal mics on stable APIs (MME, DirectSound, WASAPI)
+    for idx, d in enumerate(devices):
+        if d.get("max_input_channels", 0) > 0 and d.get("hostapi", -1) in (0, 1, 2):
+            name_lower = d["name"].lower()
+            if any(k in name_lower for k in ("microphone array", "smart sound", "realtek mic", "internal", "built-in")):
+                rate = supported_rate(idx)
+                if rate:
+                    return idx, rate
+
+    # 2. Prefer any real microphone (excluding speakers, stereo mix, midi)
+    for idx, d in enumerate(devices):
+        if d.get("max_input_channels", 0) > 0 and d.get("hostapi", -1) in (0, 1, 2):
+            name_lower = d["name"].lower()
+            if not any(b in name_lower for b in ("speaker", "output", "stereo mix", "wave", "midi", "mapper")):
+                rate = supported_rate(idx)
+                if rate:
+                    return idx, rate
+
+    # 3. Default input device if valid
+    default_dev = sd.default.device[0]
+    if default_dev is not None and default_dev >= 0:
+        rate = supported_rate(default_dev)
+        if rate:
+            return default_dev, rate
+
+    return None, None
 
 
 class Decimator:
@@ -219,10 +230,15 @@ def run_wake_word_test(assistant: VoiceAssistant, device: int, rate: int, decima
     while not audio_queue.empty():
         audio_queue.get_nowait()
 
+    print("  [Standby - Say 'Khus Khus'] Mic: [------------] Wake Conf:  0.0%", end="\r", flush=True)
+
     with sd.InputStream(samplerate=rate, blocksize=CHUNK_SAMPLES * decimate.factor, dtype='int16',
                         channels=1, device=device, callback=audio_callback):
         while True:
-            block = audio_queue.get()
+            try:
+                block = audio_queue.get(timeout=2.0)
+            except queue.Empty:
+                continue
             pcm16 = decimate(block)
             audio_buf.extend(pcm16.tobytes())
             if len(audio_buf) > MAX_BUF:
